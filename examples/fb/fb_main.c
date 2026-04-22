@@ -39,6 +39,14 @@
 #include <nuttx/video/fb.h>
 #include <nuttx/video/rgbcolors.h>
 
+
+#include "internal.h"
+#include "gl.h"
+
+
+FramebufferPixelFormat framebuffer[XRES_FRAMEBUFFER * YRES_FRAMEBUFFER];
+  uint16_t zBuffer[XRES_FRAMEBUFFER * YRES_FRAMEBUFFER];
+
 /****************************************************************************
  * Preprocessor Definitions
  ****************************************************************************/
@@ -496,25 +504,33 @@ static void draw_rect(FAR struct fb_state_s *state,
  * fb_main
  ****************************************************************************/
 
+void domain(void);
+struct fb_area_s area;
+FAR const char *fbdev = g_default_fbdev;
+struct fb_state_s state;
+
+int nsteps;
+int xstep;
+int ystep;
+int width;
+int height;
+int color;
+int x;
+int y;
+int ret;
+
 int main(int argc, FAR char *argv[])
 {
-  FAR const char *fbdev = g_default_fbdev;
-  struct fb_state_s state;
-  struct fb_area_s area;
-  int nsteps;
-  int xstep;
-  int ystep;
-  int width;
-  int height;
-  int color;
-  int x;
-  int y;
-  int ret;
+  domain();
+}
+
+int doInitWindow() {
+
 
   /* There is a single required argument:  The path to the framebuffer
    * driver.
    */
-
+  /*
   if (argc == 2)
     {
       fbdev = argv[1];
@@ -525,7 +541,7 @@ int main(int argc, FAR char *argv[])
       fprintf(stderr, "USAGE: %s [<fb-driver-path>]\n", argv[0]);
       return EXIT_FAILURE;
     }
-
+  */
   /* Open the framebuffer driver */
 
   state.fd = open(fbdev, O_RDWR);
@@ -661,36 +677,184 @@ int main(int argc, FAR char *argv[])
   width  = state.vinfo.xres;
   height = state.vinfo.yres;
 
-  for (x = 0, y = 0, color = 0;
-       color < NCOLORS;
-       x += xstep, y += ystep, color++)
-    {
-      area.x = x;
-      area.y = y;
-      area.w = width;
-      area.h = height;
 
-      printf("%2d: (%3d,%3d) (%3d,%3d)\n",
-             color, area.x, area.y, area.w, area.h);
-
-      draw_rect(&state, &area, color);
-      usleep(500 * 1000);
-
-      width  -= (2 * xstep);
-      height -= (2 * ystep);
-
-      /* double buffer mode */
-
-      if (state.pinfo.yres_virtual == (state.vinfo.yres * 2))
-        {
-          sync_area(&state);
-        }
-    }
-
+out:
   printf("Test finished\n");
   ret = EXIT_SUCCESS;
-out:
-  munmap(state.fbmem, state.pinfo.fblen);
-  close(state.fd);
+
+
   return ret;
+}
+
+
+void graphicsShutdown(void)
+{
+    munmap(state.fbmem, state.pinfo.fblen);
+    close(state.fd);
+}
+
+// Source - https://stackoverflow.com/a/3208376
+// Posted by William Whyte, modified by community. See post 'Timeline' for change history
+// Retrieved 2026-04-18, License - CC BY-SA 4.0
+
+#define BYTE_TO_BINARY_PATTERN1 "%c%c%c%c%c|%c%c%c"
+#define BYTE_TO_BINARY_PATTERN2 "%c%c%c|%c%c%c%c%c"
+
+#define BYTE_TO_BINARY(byte)  \
+  ((byte) & 0x80 ? '1' : '0'), \
+  ((byte) & 0x40 ? '1' : '0'), \
+  ((byte) & 0x20 ? '1' : '0'), \
+  ((byte) & 0x10 ? '1' : '0'), \
+  ((byte) & 0x08 ? '1' : '0'), \
+  ((byte) & 0x04 ? '1' : '0'), \
+  ((byte) & 0x02 ? '1' : '0'), \
+  ((byte) & 0x01 ? '1' : '0')
+
+
+uint16_t currentColour = 0;
+
+static void blit(FAR struct fb_state_s *state,
+                        FAR struct fb_area_s *area, uint16_t* color)
+{
+  FAR uint16_t *dest;
+  FAR uint8_t *row;
+  int x;
+  int y;
+  int ret;
+    
+    
+    ++currentColour;
+    if (currentColour > 255) {
+        currentColour = 0;
+    }
+    
+    
+    
+  row = (FAR uint8_t *)state->act_fbmem + state->pinfo.stride * area->y;
+  for (y = 0; y < area->h; y++)
+    {
+      dest = ((FAR uint16_t *)row) + area->x;
+      for (x = 0; x < area->w; x++)
+        {
+            
+            uint8_t r,g,b;
+            r = 0b11111 - ((*color) & 0b1111100000000000) >> 11;
+            g = 0b111111 - ((*color) & 0b11111100000) >> 5;
+            b = 0b11111 - ((*color) & 0b11111);
+            
+            uint16_t rgb = RGBTO16(r, g, b);
+            *dest++ = *color;
+            /*
+            if (*color == 0) {
+                printf(".");
+            } else if (*color == 0xFFFF) {
+                printf("#");
+            } else {
+                printf("$");
+            }
+             */
+            ++color;
+        }
+       // printf("\n");
+      row += state->pinfo.stride;
+    }
+    
+    
+#ifdef CONFIG_FB_UPDATE
+  int yoffset = state->act_fbmem == state->fbmem ?
+                0 : state->mem2_yoffset;
+  area->y += yoffset;
+
+  ret = ioctl(state->fd, FBIO_UPDATE,
+              (unsigned long)((uintptr_t)area));
+  if (ret < 0)
+    {
+      int errcode = errno;
+      fprintf(stderr, "ERROR: ioctl(FBIO_UPDATE) failed: %d\n",
+              errcode);
+    }
+#endif
+
+  if (state->pinfo.yres_virtual == (state->vinfo.yres * 2))
+    {
+      pan_display(state);
+    }
+}
+
+
+static void fill16(FAR struct fb_state_s *state,
+                        FAR struct fb_area_s *area, uint16_t color)
+{
+  FAR uint16_t *dest;
+  FAR uint8_t *row;
+  int x;
+  int y;
+    int ret;
+  row = (FAR uint8_t *)state->act_fbmem + state->pinfo.stride * area->y;
+  for (y = 0; y < area->h; y++)
+    {
+      dest = ((FAR uint16_t *)row) + area->x;
+      for (x = 0; x < area->w; x++)
+        {
+          *dest++ = color;
+        }
+
+      row += state->pinfo.stride;
+    }
+    
+    
+#ifdef CONFIG_FB_UPDATE
+  int yoffset = state->act_fbmem == state->fbmem ?
+                0 : state->mem2_yoffset;
+  area->y += yoffset;
+
+  ret = ioctl(state->fd, FBIO_UPDATE,
+              (unsigned long)((uintptr_t)area));
+  if (ret < 0)
+    {
+      int errcode = errno;
+      fprintf(stderr, "ERROR: ioctl(FBIO_UPDATE) failed: %d\n",
+              errcode);
+    }
+#endif
+
+  if (state->pinfo.yres_virtual == (state->vinfo.yres * 2))
+    {
+      pan_display(state);
+    }
+}
+
+void swapBuffers(void)
+{
+/*
+    for (y = 0; y < YRES_FRAMEBUFFER; ++y) {
+        for (x = 0; x < XRES_FRAMEBUFFER; ++x) {
+            uint16_t frag = framebuffer[ (XRES_FRAMEBUFFER * y) + x ];
+            
+            if (frag == 0) {
+                putchar('.');
+            } else if (frag == 0xFFFF) {
+                putchar('#');
+            } else {
+                putchar('$');
+            }
+                
+        }
+        putchar('\n');
+    }
+*/
+    
+    area.x = 0;
+    area.y = 0;
+    area.w = XRES_FRAMEBUFFER;
+    area.h = YRES_FRAMEBUFFER;
+    blit(&state, &area, &framebuffer[0]);
+    if (state.pinfo.yres_virtual == (state.vinfo.yres * 2)) {
+        sync_area(&state);
+    }
+}
+
+void initWindow( KeyCallback callback)
+{
+    doInitWindow();
 }

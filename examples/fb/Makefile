@@ -31,6 +31,6 @@ MODULE = $(CONFIG_EXAMPLES_FB)
 
 # FB, World! Example
 
-MAINSRC = fb_main.c
+MAINSRC = fb_main.c es10cl.c es11.c fpsqrt.c matricesFP.c raster.c tri.c
 
 include $(APPDIR)/Application.mk
